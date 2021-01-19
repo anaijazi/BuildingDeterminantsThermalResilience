@@ -1065,22 +1065,4 @@ Plot model performance Clean up outputs for plotting
 
 Plot model performance
 
-Balanced accuracy evaluates the overall performance of the machine
-learning model by ave raging sensitivity and specificity. A balanced
-accuracy of 50% (reference line) is analogous to random chance,
-i.e. using a coin flip to predict the outcome. As with sensitivity, we
-see that none of the ML model types evaluated performed well when I did
-not sub-sample the training data set. Sub-sampling the training data
-
-Sensitivity answers the question, how many of the “positive”,
-i.e. overheating or overcooling cases did the model correctly detect?
-The results show, that none of the ML models correctly identified
-positive cases when I did not sub-sample the training data set.
-Down-sampling improved performance of all model types, and up-sampling
-improved performance of glm and svmLinear models.
-
-With the selected input variables, model performance did not vary
-significantly based on whether the model was predicting overheating or
-overcooling.
-
 The three top performing models have identical AUC
