@@ -1,0 +1,322 @@
+---
+title: "RECS Analysis"
+author: "Arfa Aijazi"
+date: "12/22/2020"
+output: github_document
+always_allow_html: true
+---
+
+# The Contribution of Building Characteristics on Heat and Cold-Related Morbidity: Evidence from Household Surveys in the United States
+
+## Pre-Processing
+### Load libraries
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(caret)
+library(randomForest)
+library(doParallel)
+library(ggsci)
+library(Hmisc)
+library(PerformanceAnalytics)
+```
+
+### Load 2015 RECS microdata from EIA
+```{r message=FALSE, warning=FALSE}
+RECS_2015 <- read_csv("https://www.eia.gov/consumption/residential/data/2015/csv/recs2015_public_v4.csv")
+```
+
+### Explore data distribution of output classes
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+dataPlot <- RECS_2015 %>%
+  select(HOTMA, COLDMA) %>%
+  mutate(THERM = case_when(HOTMA == 1 & COLDMA == 0 ~ "Too Hot",
+                           HOTMA == 0 & COLDMA == 1 ~ "Too Cold",
+                           HOTMA == 1 & COLDMA == 1 ~ "Both",
+                           HOTMA == 0 & COLDMA == 0 ~ "None")) %>%
+  mutate(THERM = factor(THERM, levels = c("Too Hot", "Too Cold", "Both", "None"))) %>%
+  group_by(THERM) %>%
+  summarise(Count = n(), Perc = n()/nrow(RECS_2015)) %>%
+  ungroup()
+
+ggplot(dataPlot, aes(x = THERM, y = Count, fill = THERM)) + 
+  geom_col() + 
+  geom_text(aes(label = scales::percent(Perc)), vjust = -0.5) + 
+  theme_bw() +
+  theme(legend.position = "none", axis.title.x = element_blank()) +
+  scale_y_continuous(breaks = seq(0,6000,1000)) +
+  ggtitle("Frequency of Thermal Issues in Residential Buildings")
+```
+Medical assistance needed because of thermal issues is a rare event (phew!), <2% of all homes in the RECS 2015 microdata. More homes were too cold than too hot and some homes had both types of thermal issues. In classification ML problems, imbalance in observed classes can have a negative impact on model fitting. Approaches to mitigate this issue are to sub-sample the training data by *down-sampling*: subsets all classes in the training set so that their class frequencies match the least prevalent class or *up-sampling*: randomly sample (with replacement) the minority class to be the same size as the majority class. I will test the impact of both of these approaches on the predictive power of the ML model [caret documentation](https://topepo.github.io/caret/subsampling-for-class-imbalances.html).  
+
+Governments usually plan for heat and cold-related vulnerability separately, so I will develop two separate sets of models to predict whether a home is *too hot* or *too cold*, referred to as overheat and overcool. The RECS 2015 encodes "too hot" issues in the variable HOTMA and "too cold" issues in the variable COLDMA. In the overheat model HOTMA is the dependent variable and in the overcool model COLDMA is the dependent variable. Both dependent variables have two classes, they can either be "yes" or "no". The independent variables in both models are a combination of climate, demographic, and building stock features. The independent variables for both types of models is kept the same for simplicity, but I will compare the relative importance of different variables in predicting the different thermal issues. 
+
+### Filter and recode RECS 2015 data
+```{r message=FALSE, warning=FALSE}
+thermalResilience <- RECS_2015 %>%
+  select(CDD30YR, HDD30YR, DBT99, DBT1, NHSLDMEM, SDESCENT, HOUSEHOLDER_RACE, EDUCATION, EMPLOYHH, MONEYPY, HHAGE, UATYP10, KOWNRENT, ELPAY, NGPAY, LPGPAY, FOPAY, YEARMADERANGE, AIRCOND, WALLTYPE, ROOFTYPE, TYPEGLASS, WINFRAME, ADQINSUL, DRAFTY, TYPEHUQ, COOLTYPE, SWAMPCOL, HEATHOME, EQUIPM, NOHEATBROKE, NOHEATEL, NOHEATNG, NOHEATBULK, NOACBROKE, NOACEL, WINDOWS, NUMCFAN, NUMFLOORFAN, HOTMA, COLDMA) %>%
+  mutate(UATYP10 = case_when(UATYP10 == "R" ~ 0,
+                             UATYP10 == "C" ~ 1, 
+                             UATYP10 == "U" ~ 2))
+
+glimpse(thermalResilience)
+```
+
+### Identifying Zero and Near Zero-Variance Predictors
+Constant or almost constant predictors across samples, called zero or near zero-variance predictors, can cause some machine learning model types to crash or produce unstable results. The concern is that near zero-variance predictors may become zero-variance predictors when the data is split into sub-samples for training, testing, and cross-validation. This step flags zero or near-zero variance predictors, by computing two metrics for the subsetted RECS 2015 data. The frequency ratio (freqRatio) is the frequency of the most prevalent value to the second most frequent value. This value will be near 1 for well-behaved predictors and very large for highly-unbalanced data. The percent of unique values (percentUnique) is the number of unique values divided by the total number of samples (times 100). This value approaches zero for highly granular data. The default threshold for near zero-variance is a frequency ratio greater than 19 or a percentage of unique values less than 10. 
+```{r echo = FALSE, results = 'asis'}
+nzv <- nearZeroVar(thermalResilience, saveMetrics = TRUE)
+nzv <- nzv %>%
+  rownames_to_column(var = "Variable") %>%
+  arrange(desc(freqRatio)) %>%
+  filter(nzv == TRUE) %>%
+  kbl() %>%
+  kable_styling()
+nzv
+```
+
+The table above show that in addition to the 2 target variables, 9 input variables have near zero-variance. These are primarily related to the function and operation of heating and cooling systems or who pays for energy. Several of the near zero-variance predictors have frequency ratios close to 19. Namely ELPAY, HEATHOME, FOPAY, and NOACBROKE. However, others predictors have frequency ratios an order of magnitude higher, such as NOHEATNG and NOHEATBULK. 
+
+### Identifying Correlated Predictors
+Some machine learning model types thrive on correlated predictors and others benefit from reducing the level of correlation between predictors. This exercise is to understand the degree of correlation between the selected variables.
+```{r}
+# ++++++++++++++++++++++++++++
+# flattenCorrMatrix
+# ++++++++++++++++++++++++++++
+# cormat : matrix of the correlation coefficients
+# pmat : matrix of the correlation p-values
+
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor = (cormat)[ut],
+    p = pmat[ut]
+    )
+}
+```
+
+```{r}
+temp <- rcorr(as.matrix(thermalResilience)) 
+highCorr <- flattenCorrMatrix(temp$r, temp$P) %>%
+  mutate(cor = round(cor, 2)) %>%
+  mutate(p = round(p, 2)) %>%
+  arrange(desc(abs(cor)), desc(p)) %>%
+  filter(abs(cor) > 0.5) %>% # criteria for correlation
+  rename(Variable1 = row, Variable2 = column)
+  
+  
+  highCorr_kbl <- highCorr %>%
+  select(-p) %>%
+  kbl() %>%
+  kable_styling()
+
+highCorr_kbl
+```
+
+I considered absolute correlation greater than 0.5 as the threshold for a linear relationship. For variable combinations that met this criteria, I produced scatterplots to confirm if there was indeed a relationship as the correlation coefficient can be a misleading metric.
+
+```{r}
+for (i in 1:nrow(highCorr)){
+  plot_data <- thermalResilience %>%
+    select(c(highCorr$Variable1[i], highCorr$Variable2[i]))
+  plot(plot_data)
+}
+```
+The scatter plots show correlations between the climatic variables, DBT1, DBT99, HDD30YR, and CDD30YR, which makes intuitive sense. There is also a correlation between variables describing the presence of a heating or cooling system (HEATHOM and AIRCOND) and variables describing the type of heating and cooling system (EQUIPM and COOLTYPE). 
+
+### Linear Dependencies
+```{r}
+comboInfo <- findLinearCombos(thermalResilience)
+comboInfo
+```
+
+Based on analysis of zero and near-zero variance predictors, linear correlations, and linear dependencies, I will build the machine learning model with one climate variable. Typical HVI use outdoor surface temperature, but the RECS survey data only includes HDD, CDD, 99% design temperature, 1% design temperature. The linear correlation analysis showed that degree days was highly correlated to design temperature, so I will move forward with HDD and CDD to represent climate as that metric captures both the intensity (difference between outdoor temperature and base temperature) and duration (cummulative) of temperatures requiring active systems. The linear correlation analysis also found redundancy in including a variable for the presence of an active system and the type of active system. Since the variable for the type of active system also captures the lackthereof. 
+
+Prepare: overheat
+```{r}
+overheat <- thermalResilience %>%
+  select(CDD30YR, NHSLDMEM, SDESCENT, HOUSEHOLDER_RACE, EDUCATION, EMPLOYHH, MONEYPY, HHAGE, UATYP10, KOWNRENT, ELPAY, NGPAY, LPGPAY, FOPAY, YEARMADERANGE, WALLTYPE, ROOFTYPE, TYPEGLASS, WINFRAME, ADQINSUL, DRAFTY, TYPEHUQ, COOLTYPE, SWAMPCOL, NOACBROKE, NOACEL, WINDOWS, NUMCFAN, NUMFLOORFAN, HOTMA) %>%
+  mutate(HOTMA = ifelse(HOTMA == 1, "Yes", "No")) %>%
+  mutate(HOTMA = factor(HOTMA, levels = c("Yes", "No")))
+```
+
+Prepare: overcool
+```{r}
+overcool <- thermalResilience %>%
+  select(HDD30YR, NHSLDMEM, SDESCENT, HOUSEHOLDER_RACE, EDUCATION, EMPLOYHH, MONEYPY, HHAGE, UATYP10, KOWNRENT, ELPAY, NGPAY, LPGPAY, FOPAY, YEARMADERANGE, WALLTYPE, ROOFTYPE, TYPEGLASS, WINFRAME, ADQINSUL, DRAFTY, TYPEHUQ, EQUIPM, NOHEATBROKE, NOHEATEL, NOHEATNG, NOHEATBULK, WINDOWS, COLDMA) %>%
+  mutate(COLDMA = ifelse(COLDMA == 1, "Yes", "No")) %>%
+  mutate(COLDMA = factor(COLDMA, levels = c("Yes", "No")))
+```
+
+## Data Spliting
+Partition data into an 80/20% split of the RECS 2015 microdata. I created separate data partitions of the overheat and overcool model so that the training and test data sets of each model preserves the overall distribution of the thermal issue of interest.  
+```{r}
+set.seed(789) #to ensure reproducible results
+hotPartition <- createDataPartition(overheat$HOTMA, p = 0.8, list = FALSE)
+coldPartition <- createDataPartition(overcool$COLDMA, p = 0.8, list = FALSE)
+
+overheat_train <- overheat[hotPartition,] 
+overheat_test <- overheat[-hotPartition,] 
+
+overcool_train <- overcool[coldPartition,] 
+overcool_test <- overcool[-coldPartition,]
+```
+
+## Cross-validation parameters
+10-fold cross-validation repeated 10 times. Due to class imbalance in the underlying RECS 2015 data, I will also test model performance with down-sampling and up-sampling, which are both completed as part of cross-validation sub-sampling.  
+
+## Model Performance
+Since thermal issues are rare events in the RECS 2015 microdata, the overall accuracy is not a meaningful metric as a model that misclassifies all overheating events would still have an accuracy of 99.5%. Balanced accuracy is a more useful metric for evaluating a binary classifier, particularly when there are class imbalances, as is the case with this data set. The balanced accuracy is the average of the sensitivity, accuracy of detecting "positive" cases, and specificity, accuracy of detecting "negative" cases. I will also track sensitivity separately, since I am specifically interested in model performance in predicting "positive" cases i.e. cases of thermal issues.  
+
+## Model Training
+I will compare performance of overheat and overcool models developed from different ML algorithms that are suited for two-category classification problems: logistic regression, k-nearest neighbors, random forests, and support vector machines.  
+
+Define model iterations
+```{r}
+thermal <- c("overheat", "overcool")
+mlMethods <- c("glm", "knn", "rf", "svmLinear", "svmRadial")
+trainSubsample <- c("none", "down", "up")
+modelPerformance <- matrix(NA, nrow = 0, ncol = 5)
+colnames(modelPerformance) <- c("MLMethods", "SubSample", "Thermal", "Sensitivity", "BalancedAccuracy")
+variableImportance <- matrix(NA, nrow = 0, ncol = 5)
+colnames(variableImportance) <- c("MLMethods", "SubSample", "Thermal", "Variable", "Overall")
+```
+
+Parallel processing
+```{r}
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+```
+
+Train and test model performance
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+for (i in mlMethods) {
+  for (j in trainSubsample) {
+    if (j == "none") {
+      fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 10) # workaround for an open issue in caret where "none" is not a valid sampling parameter to trainControl, https://github.com/topepo/caret/issues/1001
+    }
+    else{
+      fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 10, sampling = j)
+    }
+    
+    for (k in thermal) {
+      if (k == "overheat") {
+      formula <- HOTMA ~ .
+      training <- overheat_train
+      testing <- overheat_test
+      ref <- overheat_test$HOTMA
+      y_var <- training$HOTMA
+    }
+      else{
+        formula <- COLDMA ~ .
+        training <- overcool_train
+        testing <- overcool_test
+        ref <- overcool_test$COLDMA
+        y_var <- training$COLDMA
+      }
+      set.seed(123) #to ensure reproducible results
+      model <- train(formula,
+                   data = training,
+                   method = i,
+                   trControl = fitControl,
+                   preProcess = c("center", "scale"),
+                   metric = "Kappa")
+      pred <- predict(model, testing)
+      cm <- confusionMatrix(pred, ref)
+      cm_sensitivity <- as.numeric(cm$byClass[["Sensitivity"]])
+      cm_balancedAccuracy <- as.numeric(cm$byClass[["Balanced Accuracy"]])
+      # cm_sensitivity <- runif(1)
+      # cm_balancedAccuracy <- runif(1)
+      modelPerformance <- rbind(c(i, j, k, cm_sensitivity, cm_balancedAccuracy), modelPerformance)
+      varImptemp <- filterVarImp(x = training[, -ncol(training)], y = y_var)
+      varImptemp <- as.data.frame(varImptemp) %>%
+        rownames_to_column(var ="Variable") %>%
+        rename(AUC = Yes) %>%
+        select(Variable, AUC) %>%
+        mutate(MLMethods = i) %>%
+        mutate(SubSample = j) %>%
+        mutate(Thermal = k)
+      variableImportance <- rbind(varImptemp, variableImportance)
+    }
+  }
+}
+stopCluster(cl)
+```
+
+Plot model performance
+Clean up outputs for plotting
+```{r eval=FALSE, include=FALSE}
+modelPerformance_plot <- as.data.frame(modelPerformance) %>%
+  mutate(SubSample = factor(SubSample, levels = c("none", "down", "up"))) %>%
+  mutate(Thermal = factor(Thermal, levels = c("overheat", "overcool"))) %>%
+  pivot_longer(c(Sensitivity, BalancedAccuracy), names_to = "Metric", values_to = "Value") %>%
+  mutate(Value = as.numeric(Value)) %>%
+  mutate(Value = ifelse(Value == 0, 0.01, Value)) #for plotting to visualize bars
+```
+
+Plot model performance
+```{r eval=FALSE, include=FALSE}
+ggplot(modelPerformance_plot, aes(x = SubSample, y = Value)) + 
+  geom_col(aes(fill = MLMethods), position = "dodge") + 
+  geom_hline(yintercept = 0.5, linetype = "dashed") + 
+  facet_grid(Metric~Thermal) +
+  theme_bw() +
+  scale_y_continuous(labels = scales::percent, limits = c(0,1)) +
+  theme(axis.title.y = element_blank()) +
+  xlab("Sub-Sample") +
+  ggtitle("Performance by ML Method and Sub-Sampling")
+```c
+Balanced accuracy evaluates the overall performance of the machine learning model by ave
+raging sensitivity and specificity. A balanced accuracy of 50% (reference line) is analogous to random chance, i.e. using a coin flip to predict the outcome. As with sensitivity, we see that none of the ML model types evaluated performed well when I did not sub-sample the training data set. Sub-sampling the training data 
+
+Sensitivity answers the question, how many of the "positive", i.e. overheating or overcooling cases did the model correctly detect? The results show, that none of the ML models correctly identified positive cases when I did not sub-sample the training data set. Down-sampling improved performance of all model types, and up-sampling improved performance of glm and svmLinear models. 
+
+With the selected input variables, model performance did not vary significantly based on whether the model was predicting overheating or overcooling.
+
+```{r eval=FALSE, include=FALSE}
+bestModel <- as.data.frame(modelPerformance) %>%
+  group_by(Thermal) %>%
+  arrange(desc(BalancedAccuracy)) %>%
+  mutate(Rank = 1:15) %>%
+  arrange(Rank) %>%
+  ungroup() %>%
+  select(MLMethods, SubSample, Thermal, Rank)
+
+bestModel_print <- bestModel %>%
+  kbl() %>%
+  kable_styling()
+bestModel_print
+```
+
+
+```{r eval=FALSE, include=FALSE}
+variableImportance2 <- variableImportance %>%
+  mutate(Variable = factor(Variable, levels = rev(c("CDD30YR", "HDD30YR", "DBT1", "DBT99", "NHSLDMEM", "SDESCENT", "HOUSEHOLDER_RACE", "EDUCATION", "EMPLOYHH", "MONEYPY", "HHAGE", "UATYP10", "KOWNRENT", "ELPAY", "NGPAY", "LPGPAY", "FOPAY", "YEARMADERANGE", "TYPEHUQ", "WALLTYPE", "ROOFTYPE", "ADQINSUL", "TYPEGLASS", "WINFRAME", "WINDOWS", "DRAFTY", "HEATHOME", "EQUIPM", "NOHEATBROKE", "NOHEATEL", "NOHEATNG", "NOHEATBULK", "AIRCOND", "COOLTYPE", "SWAMPCOL", "NOACBROKE", "NOACEL", "NUMCFAN", "NUMFLOORFAN")))) %>%
+  mutate(VariableClass = case_when(Variable %in% c("CDD30YR", "HDD30YR", "DBT99", "DBT1") ~ "Climate",
+                                   Variable %in% c("NHSLDMEM", "SDESCENT", "HOUSEHOLDER_RACE", "EDUCATION", "EMPLOYHH", "MONEYPY", "HHAGE", "UATYP10", "KOWNRENT", "ELPAY", "NGPAY", "LPGPAY", "FOPAY") ~ "Demographic",
+                                   Variable %in% c("YEARMADERANGE", "TYPEHUQ") ~ "BuildingConstruction",
+                                   Variable %in% c("WALLTYPE", "ROOFTYPE", "ADQINSUL", "TYPEGLASS", "WINFRAME", "WINDOWS", "DRAFTY") ~ "BuildingEnvelope",
+                                   Variable %in% c("HEATHOME", "EQUIPM", "NOHEATBROKE", "NOHEATEL", "NOHEATNG", "NOHEATBULK") ~ "Heating",
+                                   Variable %in% c("AIRCOND", "COOLTYPE", "SWAMPCOL", "NOACBROKE", "NOACEL", "NUMCFAN", "NUMFLOORFAN") ~ "Cooling")) %>%
+  mutate(VariableClass = factor(VariableClass, levels = c("Climate", "Demographic", "BuildingConstruction", "BuildingEnvelope", "Heating", "Cooling"))) %>%
+  inner_join(bestModel) %>%
+  mutate(Thermal = factor(Thermal, levels = c("overheat", "overcool"))) %>%
+  mutate(SubSample = factor(SubSample, levels = c("none", "down", "up"))) %>%
+  #filter(Rank <= 3) %>%
+  mutate(Rank = factor(Rank)) %>%
+  mutate(AUC_adjust = AUC - 0.5)
+
+```
+
+```{r eval=FALSE, include=FALSE}
+ggplot(variableImportance2, aes(x = Variable, y = AUC_adjust, group = Rank)) +
+  geom_col(aes(fill = Rank), position = "dodge") + 
+  facet_grid(.~Thermal) +
+  coord_flip() +
+  theme_bw()
+```
+The three top performing models have identical AUC
+
