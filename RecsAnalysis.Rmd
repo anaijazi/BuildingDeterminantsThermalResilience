@@ -192,7 +192,7 @@ registerDoParallel(cl)
 ```
 
 Train and test model performance
-```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+```{r echo=TRUE, message=FALSE, warning=FALSE}
 for (i in mlMethods) {
   for (j in trainSubsample) {
     if (j == "none") {
@@ -248,7 +248,7 @@ stopCluster(cl)
 
 Plot model performance
 Clean up outputs for plotting
-```{r eval=FALSE, include=FALSE}
+```{r include=FALSE}
 modelPerformance_plot <- as.data.frame(modelPerformance) %>%
   mutate(SubSample = factor(SubSample, levels = c("none", "down", "up"))) %>%
   mutate(Thermal = factor(Thermal, levels = c("overheat", "overcool"))) %>%
@@ -258,7 +258,7 @@ modelPerformance_plot <- as.data.frame(modelPerformance) %>%
 ```
 
 Plot model performance
-```{r eval=FALSE, include=FALSE}
+```{r echo=FALSE}
 ggplot(modelPerformance_plot, aes(x = SubSample, y = Value)) + 
   geom_col(aes(fill = MLMethods), position = "dodge") + 
   geom_hline(yintercept = 0.5, linetype = "dashed") + 
@@ -268,7 +268,8 @@ ggplot(modelPerformance_plot, aes(x = SubSample, y = Value)) +
   theme(axis.title.y = element_blank()) +
   xlab("Sub-Sample") +
   ggtitle("Performance by ML Method and Sub-Sampling")
-```c
+```
+
 Balanced accuracy evaluates the overall performance of the machine learning model by ave
 raging sensitivity and specificity. A balanced accuracy of 50% (reference line) is analogous to random chance, i.e. using a coin flip to predict the outcome. As with sensitivity, we see that none of the ML model types evaluated performed well when I did not sub-sample the training data set. Sub-sampling the training data 
 
@@ -276,7 +277,7 @@ Sensitivity answers the question, how many of the "positive", i.e. overheating o
 
 With the selected input variables, model performance did not vary significantly based on whether the model was predicting overheating or overcooling.
 
-```{r eval=FALSE, include=FALSE}
+```{r message=FALSE, warning=FALSE}
 bestModel <- as.data.frame(modelPerformance) %>%
   group_by(Thermal) %>%
   arrange(desc(BalancedAccuracy)) %>%
@@ -292,7 +293,7 @@ bestModel_print
 ```
 
 
-```{r eval=FALSE, include=FALSE}
+```{r echo=TRUE}
 variableImportance2 <- variableImportance %>%
   mutate(Variable = factor(Variable, levels = rev(c("CDD30YR", "HDD30YR", "DBT1", "DBT99", "NHSLDMEM", "SDESCENT", "HOUSEHOLDER_RACE", "EDUCATION", "EMPLOYHH", "MONEYPY", "HHAGE", "UATYP10", "KOWNRENT", "ELPAY", "NGPAY", "LPGPAY", "FOPAY", "YEARMADERANGE", "TYPEHUQ", "WALLTYPE", "ROOFTYPE", "ADQINSUL", "TYPEGLASS", "WINFRAME", "WINDOWS", "DRAFTY", "HEATHOME", "EQUIPM", "NOHEATBROKE", "NOHEATEL", "NOHEATNG", "NOHEATBULK", "AIRCOND", "COOLTYPE", "SWAMPCOL", "NOACBROKE", "NOACEL", "NUMCFAN", "NUMFLOORFAN")))) %>%
   mutate(VariableClass = case_when(Variable %in% c("CDD30YR", "HDD30YR", "DBT99", "DBT1") ~ "Climate",
@@ -311,7 +312,7 @@ variableImportance2 <- variableImportance %>%
 
 ```
 
-```{r eval=FALSE, include=FALSE}
+```{r echo=FALSE}
 ggplot(variableImportance2, aes(x = Variable, y = AUC_adjust, group = Rank)) +
   geom_col(aes(fill = Rank), position = "dodge") + 
   facet_grid(.~Thermal) +

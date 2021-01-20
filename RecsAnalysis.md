@@ -1061,8 +1061,997 @@ registerDoParallel(cl)
 
 Train and test model performance
 
+``` r
+for (i in mlMethods) {
+  for (j in trainSubsample) {
+    if (j == "none") {
+      fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 10) # workaround for an open issue in caret where "none" is not a valid sampling parameter to trainControl, https://github.com/topepo/caret/issues/1001
+    }
+    else{
+      fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 10, sampling = j)
+    }
+    
+    for (k in thermal) {
+      if (k == "overheat") {
+      formula <- HOTMA ~ .
+      training <- overheat_train
+      testing <- overheat_test
+      ref <- overheat_test$HOTMA
+      y_var <- training$HOTMA
+    }
+      else{
+        formula <- COLDMA ~ .
+        training <- overcool_train
+        testing <- overcool_test
+        ref <- overcool_test$COLDMA
+        y_var <- training$COLDMA
+      }
+      set.seed(123) #to ensure reproducible results
+      model <- train(formula,
+                   data = training,
+                   method = i,
+                   trControl = fitControl,
+                   preProcess = c("center", "scale"),
+                   metric = "Kappa")
+      pred <- predict(model, testing)
+      cm <- confusionMatrix(pred, ref)
+      cm_sensitivity <- as.numeric(cm$byClass[["Sensitivity"]])
+      cm_balancedAccuracy <- as.numeric(cm$byClass[["Balanced Accuracy"]])
+      # cm_sensitivity <- runif(1)
+      # cm_balancedAccuracy <- runif(1)
+      modelPerformance <- rbind(c(i, j, k, cm_sensitivity, cm_balancedAccuracy), modelPerformance)
+      varImptemp <- filterVarImp(x = training[, -ncol(training)], y = y_var)
+      varImptemp <- as.data.frame(varImptemp) %>%
+        rownames_to_column(var ="Variable") %>%
+        rename(AUC = Yes) %>%
+        select(Variable, AUC) %>%
+        mutate(MLMethods = i) %>%
+        mutate(SubSample = j) %>%
+        mutate(Thermal = k)
+      variableImportance <- rbind(varImptemp, variableImportance)
+    }
+  }
+}
+stopCluster(cl)
+```
+
 Plot model performance Clean up outputs for plotting
 
 Plot model performance
+![](RecsAnalysis_files/figure-gfm/unnamed-chunk-17-1.png)<!-- -->
 
-The three top performing models have identical AUC
+Balanced accuracy evaluates the overall performance of the machine
+learning model by ave raging sensitivity and specificity. A balanced
+accuracy of 50% (reference line) is analogous to random chance,
+i.e. using a coin flip to predict the outcome. As with sensitivity, we
+see that none of the ML model types evaluated performed well when I did
+not sub-sample the training data set. Sub-sampling the training data
+
+Sensitivity answers the question, how many of the “positive”,
+i.e. overheating or overcooling cases did the model correctly detect?
+The results show, that none of the ML models correctly identified
+positive cases when I did not sub-sample the training data set.
+Down-sampling improved performance of all model types, and up-sampling
+improved performance of glm and svmLinear models.
+
+With the selected input variables, model performance did not vary
+significantly based on whether the model was predicting overheating or
+overcooling.
+
+``` r
+bestModel <- as.data.frame(modelPerformance) %>%
+  group_by(Thermal) %>%
+  arrange(desc(BalancedAccuracy)) %>%
+  mutate(Rank = 1:15) %>%
+  arrange(Rank) %>%
+  ungroup() %>%
+  select(MLMethods, SubSample, Thermal, Rank)
+
+bestModel_print <- bestModel %>%
+  kbl() %>%
+  kable_styling()
+bestModel_print
+```
+
+<table class="table" style="margin-left: auto; margin-right: auto;">
+
+<thead>
+
+<tr>
+
+<th style="text-align:left;">
+
+MLMethods
+
+</th>
+
+<th style="text-align:left;">
+
+SubSample
+
+</th>
+
+<th style="text-align:left;">
+
+Thermal
+
+</th>
+
+<th style="text-align:right;">
+
+Rank
+
+</th>
+
+</tr>
+
+</thead>
+
+<tbody>
+
+<tr>
+
+<td style="text-align:left;">
+
+glm
+
+</td>
+
+<td style="text-align:left;">
+
+up
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+1
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmRadial
+
+</td>
+
+<td style="text-align:left;">
+
+down
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+1
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmRadial
+
+</td>
+
+<td style="text-align:left;">
+
+down
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+2
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+rf
+
+</td>
+
+<td style="text-align:left;">
+
+down
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+2
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmLinear
+
+</td>
+
+<td style="text-align:left;">
+
+up
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+3
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmLinear
+
+</td>
+
+<td style="text-align:left;">
+
+up
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+3
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+rf
+
+</td>
+
+<td style="text-align:left;">
+
+down
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+4
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmLinear
+
+</td>
+
+<td style="text-align:left;">
+
+down
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+4
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+glm
+
+</td>
+
+<td style="text-align:left;">
+
+up
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+5
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmLinear
+
+</td>
+
+<td style="text-align:left;">
+
+down
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+5
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+knn
+
+</td>
+
+<td style="text-align:left;">
+
+down
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+6
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+glm
+
+</td>
+
+<td style="text-align:left;">
+
+down
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+6
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmRadial
+
+</td>
+
+<td style="text-align:left;">
+
+up
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+7
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+knn
+
+</td>
+
+<td style="text-align:left;">
+
+down
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+7
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+glm
+
+</td>
+
+<td style="text-align:left;">
+
+down
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+8
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmRadial
+
+</td>
+
+<td style="text-align:left;">
+
+up
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+8
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+knn
+
+</td>
+
+<td style="text-align:left;">
+
+up
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+9
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmRadial
+
+</td>
+
+<td style="text-align:left;">
+
+none
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+9
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmRadial
+
+</td>
+
+<td style="text-align:left;">
+
+none
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+10
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmLinear
+
+</td>
+
+<td style="text-align:left;">
+
+none
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+10
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+svmLinear
+
+</td>
+
+<td style="text-align:left;">
+
+none
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+11
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+rf
+
+</td>
+
+<td style="text-align:left;">
+
+up
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+11
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+rf
+
+</td>
+
+<td style="text-align:left;">
+
+none
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+12
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+rf
+
+</td>
+
+<td style="text-align:left;">
+
+none
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+12
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+knn
+
+</td>
+
+<td style="text-align:left;">
+
+none
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+13
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+knn
+
+</td>
+
+<td style="text-align:left;">
+
+none
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+13
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+glm
+
+</td>
+
+<td style="text-align:left;">
+
+none
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+14
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+glm
+
+</td>
+
+<td style="text-align:left;">
+
+none
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+14
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+rf
+
+</td>
+
+<td style="text-align:left;">
+
+up
+
+</td>
+
+<td style="text-align:left;">
+
+overcool
+
+</td>
+
+<td style="text-align:right;">
+
+15
+
+</td>
+
+</tr>
+
+<tr>
+
+<td style="text-align:left;">
+
+knn
+
+</td>
+
+<td style="text-align:left;">
+
+up
+
+</td>
+
+<td style="text-align:left;">
+
+overheat
+
+</td>
+
+<td style="text-align:right;">
+
+15
+
+</td>
+
+</tr>
+
+</tbody>
+
+</table>
+
+``` r
+variableImportance2 <- variableImportance %>%
+  mutate(Variable = factor(Variable, levels = rev(c("CDD30YR", "HDD30YR", "DBT1", "DBT99", "NHSLDMEM", "SDESCENT", "HOUSEHOLDER_RACE", "EDUCATION", "EMPLOYHH", "MONEYPY", "HHAGE", "UATYP10", "KOWNRENT", "ELPAY", "NGPAY", "LPGPAY", "FOPAY", "YEARMADERANGE", "TYPEHUQ", "WALLTYPE", "ROOFTYPE", "ADQINSUL", "TYPEGLASS", "WINFRAME", "WINDOWS", "DRAFTY", "HEATHOME", "EQUIPM", "NOHEATBROKE", "NOHEATEL", "NOHEATNG", "NOHEATBULK", "AIRCOND", "COOLTYPE", "SWAMPCOL", "NOACBROKE", "NOACEL", "NUMCFAN", "NUMFLOORFAN")))) %>%
+  mutate(VariableClass = case_when(Variable %in% c("CDD30YR", "HDD30YR", "DBT99", "DBT1") ~ "Climate",
+                                   Variable %in% c("NHSLDMEM", "SDESCENT", "HOUSEHOLDER_RACE", "EDUCATION", "EMPLOYHH", "MONEYPY", "HHAGE", "UATYP10", "KOWNRENT", "ELPAY", "NGPAY", "LPGPAY", "FOPAY") ~ "Demographic",
+                                   Variable %in% c("YEARMADERANGE", "TYPEHUQ") ~ "BuildingConstruction",
+                                   Variable %in% c("WALLTYPE", "ROOFTYPE", "ADQINSUL", "TYPEGLASS", "WINFRAME", "WINDOWS", "DRAFTY") ~ "BuildingEnvelope",
+                                   Variable %in% c("HEATHOME", "EQUIPM", "NOHEATBROKE", "NOHEATEL", "NOHEATNG", "NOHEATBULK") ~ "Heating",
+                                   Variable %in% c("AIRCOND", "COOLTYPE", "SWAMPCOL", "NOACBROKE", "NOACEL", "NUMCFAN", "NUMFLOORFAN") ~ "Cooling")) %>%
+  mutate(VariableClass = factor(VariableClass, levels = c("Climate", "Demographic", "BuildingConstruction", "BuildingEnvelope", "Heating", "Cooling"))) %>%
+  inner_join(bestModel) %>%
+  mutate(Thermal = factor(Thermal, levels = c("overheat", "overcool"))) %>%
+  mutate(SubSample = factor(SubSample, levels = c("none", "down", "up"))) %>%
+  #filter(Rank <= 3) %>%
+  mutate(Rank = factor(Rank)) %>%
+  mutate(AUC_adjust = AUC - 0.5)
+```
+
+    ## Joining, by = c("MLMethods", "SubSample", "Thermal")
+
+![](RecsAnalysis_files/figure-gfm/unnamed-chunk-20-1.png)<!-- --> The
+three top performing models have identical AUC
